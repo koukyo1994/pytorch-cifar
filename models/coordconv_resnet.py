@@ -1,14 +1,84 @@
-'''ResNet in PyTorch.
-
-For Pre-activation ResNet, see 'preact_resnet.py'.
-
-Reference:
-[1] Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun
-    Deep Residual Learning for Image Recognition. arXiv:1512.03385
-'''
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+class AddCoords(nn.Module):
+    def __init__(self, rank, with_r=False, device="cpu"):
+        super(AddCoords, self).__init__()
+        self.rank = rank
+        self.with_r = with_r
+        self.device = device
+
+    def forward(self, input_tensor):
+        if self.rank == 2:
+            b, c, y, x = input_tensor.shape
+            x_ones = torch.ones([1, 1, 1, x], dtype=torch.int32)
+            y_ones = torch.ones([1, 1, 1, y], dtype=torch.int32)
+
+            x_range = torch.arange(y, dtype=torch.int32)
+            y_range = torch.arange(x, dtype=torch.int32)
+            x_range = x_range[None, None, :, None]
+            y_range = y_range[None, None, :, None]
+
+            x_channel = torch.matmul(x_range, x_ones)
+            y_channel = torch.matmul(y_range, y_ones)
+
+            # transpose y
+            y_channel = y_channel.permute(0, 1, 3, 2)
+
+            # normalization
+            x_channel = x_channel.float() / (y - 1)
+            y_channel = y_channel.float() / (x - 1)
+
+            x_channel = x_channel * 2 - 1
+            y_channel = y_channel * 2 - 1
+
+            x_channel = x_channel.repeat(b, 1, 1, 1)
+            y_channel = y_channel.repeat(b, 1, 1, 1)
+
+            # put tensor to the device
+            x_channel = x_channel.to(self.device)
+            y_channel = y_channel.to(self.device)
+
+            out = torch.cat([input_tensor, x_channel, y_channel], dim=1)
+            if self.with_r:
+                rr = torch.sqrt(
+                    torch.pow(x_channel - 0.5, 2) +
+                    torch.pow(y_channel - 0.5, 2))
+                out = torch.cat([out, rr], dim=1)
+        else:
+            raise NotImplementedError
+
+        return out
+
+
+class CoordConv2d(nn.Conv2d):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride=1,
+                 padding=0,
+                 dilation=1,
+                 groups=1,
+                 bias=True,
+                 with_r=False,
+                 device="cpu"):
+        super(CoordConv2d,
+              self).__init__(in_channels, out_channels, kernel_size, stride,
+                             padding, dilation, groups, bias)
+        self.rank = 2
+        self.addcoords = AddCoords(self.rank, with_r, device)
+        self.conv = nn.Conv2d(in_channels + self.rank + int(with_r),
+                              out_channels, kernel_size, stride, padding,
+                              dilation, groups, bias)
+
+    def forward(self, input_tensor):
+        out = self.addcoords(input_tensor)
+        out = self.conv(out)
+
+        return out
 
 
 class BasicBlock(nn.Module):
@@ -84,13 +154,15 @@ class Bottleneck(nn.Module):
         return out
 
 
-class ResNet(nn.Module):
-    def __init__(self, block, num_blocks, num_classes=10):
-        super(ResNet, self).__init__()
+class CoordResNet(nn.Module):
+    def __init__(self, block, num_blocks, num_classes=10, device="cpu"):
+        super(CoordResNet, self).__init__()
         self.in_planes = 64
 
+        self.coordconv = CoordConv2d(
+            3, 8, 1, bias=False, with_r=True, device=device)
         self.conv1 = nn.Conv2d(
-            3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+            8, 64, kernel_size=3, stride=1, padding=1, bias=False)
         self.bn1 = nn.BatchNorm2d(64)
         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
@@ -107,7 +179,8 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.coordconv(x)
+        out = F.relu(self.bn1(self.conv1(out)))
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
@@ -118,30 +191,31 @@ class ResNet(nn.Module):
         return out
 
 
-def ResNet18():
-    return ResNet(BasicBlock, [2, 2, 2, 2])
+def CoordResNet18(device="cpu"):
+    return CoordResNet(BasicBlock, [2, 2, 2, 2], device=device)
 
 
-def ResNet34():
-    return ResNet(BasicBlock, [3, 4, 6, 3])
+def CoordResNet34(device="cpu"):
+    return CoordResNet(BasicBlock, [3, 4, 6, 3], device=device)
 
 
-def ResNet50():
-    return ResNet(Bottleneck, [3, 4, 6, 3])
+def CoordResNet50(device="cpu"):
+    return CoordResNet(Bottleneck, [3, 4, 6, 3], device=device)
 
 
-def ResNet101():
-    return ResNet(Bottleneck, [3, 4, 23, 3])
+def CoordResNet101(device="cpu"):
+    return CoordResNet(Bottleneck, [3, 4, 23, 3], device=device)
 
 
-def ResNet152():
-    return ResNet(Bottleneck, [3, 8, 36, 3])
+def CoordResNet152(device="cpu"):
+    return CoordResNet(Bottleneck, [3, 8, 36, 3], device=device)
 
 
 def test():
-    net = ResNet18()
+    net = CoordResNet18()
     y = net(torch.randn(1, 3, 32, 32))
     print(y.size())
 
 
-test()
+if __name__ == '__main__':
+    test()
